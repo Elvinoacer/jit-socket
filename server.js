@@ -1,7 +1,11 @@
 const http = require("http");
+const express = require("express");
 const { Server } = require("socket.io");
 require("dotenv").config();
-const httpServer = http.createServer();
+
+const app = express();
+const httpServer = http.createServer(app);
+
 const io = new Server(httpServer, {
   cors: {
     origin: process.env.ORIGIN_ENPOINT,
@@ -9,36 +13,41 @@ const io = new Server(httpServer, {
   },
 });
 
-// Track online users: userId -> socketId
+// ============ HEALTH CHECK FOR RENDER ============
+app.get("/", (req, res) => {
+  res.send("Socket.io server is running 🚀");
+});
+
+// ============ ONLINE USERS MAP ============
 const onlineUsers = new Map();
 
+// ============ SOCKET.IO LOGIC ============
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  // User joins their own room based on userId
+  // JOIN ROOM
   socket.on("join", (userId) => {
     socket.join(userId);
     onlineUsers.set(userId, socket.id);
+
     console.log(`User ${userId} joined room ${userId}`);
 
-    // Broadcast online status to everyone (or could be scoped to contacts)
+    // Notify others user is online
     socket.broadcast.emit("user_online", { userId });
 
-    // Send list of online users to the new user
+    // Send current online users to the new user
     const onlineUserIds = Array.from(onlineUsers.keys());
     socket.emit("online_users_list", { userIds: onlineUserIds });
   });
 
-  // Handle sending messages
+  // SEND MESSAGE
   socket.on("send_message", (message) => {
-    // Broadcast to receiver's room
     io.to(message.receiverId).emit("receive_message", {
       ...message,
       isRead: false,
       isDelivered: false,
     });
 
-    // Also emit back to sender (for multi-device sync)
     io.to(message.senderId).emit("receive_message", {
       ...message,
       isRead: false,
@@ -46,19 +55,17 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Handle message read status
+  // READ RECEIPT
   socket.on("message_read", ({ messageId, senderId, receiverId }) => {
-    // Notify sender that message was read
     io.to(senderId).emit("message_read", { messageId, receiverId });
   });
 
-  // Handle message delivered status
+  // DELIVERY RECEIPT
   socket.on("message_delivered", ({ messageId, senderId, receiverId }) => {
-    // Notify sender that message was delivered
     io.to(senderId).emit("message_delivered", { messageId, receiverId });
   });
 
-  // Handle typing indicators
+  // TYPING INDICATORS
   socket.on("typing", ({ senderId, receiverId }) => {
     io.to(receiverId).emit("user_typing", { senderId });
   });
@@ -67,10 +74,10 @@ io.on("connection", (socket) => {
     io.to(receiverId).emit("user_stop_typing", { senderId });
   });
 
+  // DISCONNECT HANDLER
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
 
-    // Find userId for this socket
     let disconnectedUserId = null;
     for (const [userId, socketId] of onlineUsers.entries()) {
       if (socketId === socket.id) {
@@ -86,7 +93,9 @@ io.on("connection", (socket) => {
   });
 });
 
-const PORT = 4000;
+// ============ PORT CONFIG (Render Compatible) ============
+const PORT = process.env.PORT || 4000;
+
 httpServer.listen(PORT, () => {
-  console.log(`Socket.io server running on port ${PORT}`);
+  console.log(`🔥 Socket.io server running on port ${PORT}`);
 });
