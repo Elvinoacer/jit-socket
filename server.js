@@ -74,6 +74,11 @@ io.on("connection", (socket) => {
     io.to(receiverId).emit("user_stop_typing", { senderId });
   });
 
+  // PING/PONG - Keep connection alive
+  socket.on("ping", () => {
+    socket.emit("pong");
+  });
+
   // DISCONNECT HANDLER
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
