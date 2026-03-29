@@ -6,9 +6,17 @@ require("dotenv").config();
 const app = express();
 const httpServer = http.createServer(app);
 
+const allowedOrigins = [
+  process.env.ORIGIN_ENDPOINT,
+  process.env.ORIGIN_ENPOINT,
+  process.env.NEXTAUTH_URL,
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+].filter(Boolean);
+
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.ORIGIN_ENPOINT,
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
   },
 });
@@ -72,6 +80,43 @@ io.on("connection", (socket) => {
 
   socket.on("stop_typing", ({ senderId, receiverId }) => {
     io.to(receiverId).emit("user_stop_typing", { senderId });
+  });
+
+  // ============ WEBRTC SIGNALING ============
+
+  // Initiate Call
+  socket.on("call_user", (data) => {
+    // data: { userToCall, signalData, from, name }
+    io.to(data.userToCall).emit("call_user", {
+      signal: data.signalData,
+      from: data.from,
+      name: data.name,
+      callType: data.callType,
+    });
+  });
+
+  // Answer Call
+  socket.on("answer_call", (data) => {
+    // data: { to, signal }
+    io.to(data.to).emit("call_accepted", data.signal);
+  });
+
+  // Reject Call
+  socket.on("reject_call", (data) => {
+    // data: { to }
+    io.to(data.to).emit("call_rejected");
+  });
+
+  // End Call
+  socket.on("end_call", (data) => {
+    // data: { to }
+    io.to(data.to).emit("call_ended");
+  });
+
+  // ICE Candidates
+  socket.on("ice_candidate", (data) => {
+    // data: { to, candidate }
+    io.to(data.to).emit("ice_candidate", { candidate: data.candidate });
   });
 
   // PING/PONG - Keep connection alive
