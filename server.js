@@ -91,6 +91,7 @@ io.on("connection", (socket) => {
       signal: data.signalData,
       from: data.from,
       name: data.name,
+      image: data.image,
       callType: data.callType,
     });
   });
