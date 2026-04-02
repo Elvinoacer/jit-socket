@@ -1,10 +1,13 @@
-const http = require("http");
-const express = require("express");
-const { Server } = require("socket.io");
-require("dotenv").config();
+import http from "node:http";
+import express from "express";
+import { Server } from "socket.io";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 const httpServer = http.createServer(app);
+app.use(express.json({ limit: "256kb" }));
 
 const allowedOrigins = [
   process.env.ORIGIN_ENDPOINT,
@@ -27,7 +30,121 @@ app.get("/", (req, res) => {
 });
 
 // ============ ONLINE USERS MAP ============
+// Tracks all active sockets per user for multi-tab/device support.
 const onlineUsers = new Map();
+
+function getOnlineUserIds() {
+  return Array.from(onlineUsers.keys());
+}
+
+function addOnlineSocket(userId, socketId) {
+  const sockets = onlineUsers.get(userId) || new Set();
+  const wasOffline = sockets.size === 0;
+  sockets.add(socketId);
+  onlineUsers.set(userId, sockets);
+  return wasOffline;
+}
+
+function removeOnlineSocket(socketId) {
+  for (const [userId, sockets] of onlineUsers.entries()) {
+    if (!sockets.has(socketId)) continue;
+
+    sockets.delete(socketId);
+    if (sockets.size === 0) {
+      onlineUsers.delete(userId);
+      return { userId, becameOffline: true };
+    }
+
+    onlineUsers.set(userId, sockets);
+    return { userId, becameOffline: false };
+  }
+
+  return null;
+}
+
+app.post("/internal/broadcast", (req, res) => {
+  const expectedToken = process.env.SOCKET_INTERNAL_BROADCAST_TOKEN;
+  const authHeader = req.headers.authorization;
+
+  if (expectedToken && authHeader !== `Bearer ${expectedToken}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { event, data } = req.body || {};
+
+  if (!event || typeof data !== "object" || data === null) {
+    return res.status(400).json({ error: "Invalid broadcast payload" });
+  }
+
+  if (event === "new_message") {
+    const message = data.message;
+    if (!message?.senderId || !message?.receiverId) {
+      return res.status(400).json({ error: "Invalid message payload" });
+    }
+
+    io.to(message.receiverId).emit("receive_message", message);
+    io.to(message.senderId).emit("receive_message", message);
+    return res.json({ ok: true });
+  }
+
+  if (event === "messages_read") {
+    const targetUserId = data.targetUserId;
+    const messageIds = Array.isArray(data.messageIds)
+      ? data.messageIds.filter((id) => typeof id === "string")
+      : [];
+    const readerId = data.readerId;
+
+    if (!targetUserId || messageIds.length === 0) {
+      return res.status(400).json({ error: "Invalid read receipt payload" });
+    }
+
+    io.to(targetUserId).emit("messages_read", {
+      messageIds,
+      readerId: typeof readerId === "string" ? readerId : null,
+    });
+
+    for (const messageId of messageIds) {
+      io.to(targetUserId).emit("message_read", { messageId, readerId });
+    }
+
+    return res.json({ ok: true });
+  }
+
+  if (event === "message_delivered") {
+    const targetUserId = data.targetUserId;
+    const messageId = data.messageId;
+
+    if (!targetUserId || !messageId) {
+      return res
+        .status(400)
+        .json({ error: "Invalid delivery receipt payload" });
+    }
+
+    io.to(targetUserId).emit("message_delivered", {
+      messageId,
+      receiverId: data.receiverId || null,
+    });
+    return res.json({ ok: true });
+  }
+
+  if (event === "conversation_cleared") {
+    const targetUserId = data.targetUserId;
+    const clearedById = data.clearedById;
+    const partnerId =
+      typeof data.partnerId === "string" ? data.partnerId : null;
+    if (!targetUserId || !clearedById) {
+      return res.status(400).json({ error: "Invalid clear payload" });
+    }
+
+    io.to(targetUserId).emit("conversation_cleared", {
+      clearedById,
+      partnerId,
+    });
+    return res.json({ ok: true });
+  }
+
+  return res.status(400).json({ error: "Unsupported broadcast event" });
+});
 
 // ============ SOCKET.IO LOGIC ============
 io.on("connection", (socket) => {
@@ -35,21 +152,28 @@ io.on("connection", (socket) => {
 
   // JOIN ROOM
   socket.on("join", (userId) => {
+    if (!userId || typeof userId !== "string") return;
+
     socket.join(userId);
-    onlineUsers.set(userId, socket.id);
+    socket.data.userId = userId;
+
+    const becameOnline = addOnlineSocket(userId, socket.id);
 
     console.log(`User ${userId} joined room ${userId}`);
 
     // Notify others user is online
-    socket.broadcast.emit("user_online", { userId });
+    if (becameOnline) {
+      socket.broadcast.emit("user_online", { userId });
+    }
 
     // Send current online users to the new user
-    const onlineUserIds = Array.from(onlineUsers.keys());
-    socket.emit("online_users_list", { userIds: onlineUserIds });
+    socket.emit("online_users_list", { userIds: getOnlineUserIds() });
   });
 
   // SEND MESSAGE
   socket.on("send_message", (message) => {
+    if (!message?.receiverId || !message?.senderId) return;
+
     io.to(message.receiverId).emit("receive_message", {
       ...message,
       isRead: false,
@@ -129,17 +253,9 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
 
-    let disconnectedUserId = null;
-    for (const [userId, socketId] of onlineUsers.entries()) {
-      if (socketId === socket.id) {
-        disconnectedUserId = userId;
-        onlineUsers.delete(userId);
-        break;
-      }
-    }
-
-    if (disconnectedUserId) {
-      socket.broadcast.emit("user_offline", { userId: disconnectedUserId });
+    const disconnected = removeOnlineSocket(socket.id);
+    if (disconnected?.becameOffline) {
+      socket.broadcast.emit("user_offline", { userId: disconnected.userId });
     }
   });
 });
